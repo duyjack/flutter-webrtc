@@ -10,9 +10,12 @@
 #include <flutter/standard_method_codec.h>
 #include <flutter/texture_registrar.h>
 
-#include <string>
-#include <memory>
 #include <list>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <string>
 
 typedef flutter::EncodableValue EncodableValue;
 typedef flutter::EncodableMap EncodableMap;
@@ -25,6 +28,8 @@ typedef flutter::EventChannel<EncodableValue> EventChannel;
 typedef flutter::EventSink<EncodableValue> EventSink;
 typedef flutter::MethodCall<EncodableValue> MethodCall;
 typedef flutter::MethodResult<EncodableValue> MethodResult;
+
+class TaskRunner;
 
 // foo.StringValue() becomes std::get<std::string>(foo)
 // foo.IsString() becomes std::holds_alternative<std::string>(foo)
@@ -75,11 +80,34 @@ inline int findInt(const EncodableMap& map, const std::string& key) {
   return -1;
 }
 
+inline bool findBoolean(const EncodableMap& map, const std::string& key) {
+  auto it = map.find(EncodableValue(key));
+  if (it != map.end() && TypeIs<bool>(it->second))
+    return GetValue<bool>(it->second);
+  return false;
+}
+
 inline double findDouble(const EncodableMap& map, const std::string& key) {
   auto it = map.find(EncodableValue(key));
   if (it != map.end() && TypeIs<double>(it->second))
     return GetValue<double>(it->second);
   return 0.0;
+}
+
+inline std::optional<double> maybeFindDouble(const EncodableMap& map,
+                                             const std::string& key) {
+  auto it = map.find(EncodableValue(key));
+  if (it != map.end() && TypeIs<double>(it->second))
+    return GetValue<double>(it->second);
+  return std::nullopt;
+}
+
+inline std::vector<uint8_t> findVector(const EncodableMap& map,
+                                       const std::string& key) {
+  auto it = map.find(EncodableValue(key));
+  if (it != map.end() && TypeIs<std::vector<uint8_t>>(it->second))
+    return GetValue<std::vector<uint8_t>>(it->second);
+  return std::vector<uint8_t>();
 }
 
 inline int64_t findLongInt(const EncodableMap& map, const std::string& key) {
@@ -148,6 +176,7 @@ class EventChannelProxy {
  public:
   static std::unique_ptr<EventChannelProxy> Create(
       BinaryMessenger* messenger,
+      TaskRunner* task_runner,
       const std::string& channelName);
 
   virtual ~EventChannelProxy() = default;

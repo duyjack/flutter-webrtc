@@ -1,12 +1,18 @@
 import 'dart:async';
-import 'dart:html' as html;
-import 'dart:js_util' as jsutil;
-import 'dart:ui' as ui;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
+import 'dart:ui_web' as web_ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'package:dart_webrtc/dart_webrtc.dart';
+import 'package:web/web.dart' as web;
+
+import '../video_renderer_extension.dart' show AudioControl;
+
+const bool useHtmlElementView =
+    bool.fromEnvironment("WEBRTC_USE_HTML_ELEMENT_VIEW", defaultValue: false);
 
 // An error code value to error name Map.
 // See: https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
@@ -32,20 +38,20 @@ const String _kDefaultErrorMessage =
     'No further diagnostic information can be determined or provided.';
 
 class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
-    implements VideoRenderer {
+    implements VideoRenderer, AudioControl {
   RTCVideoRenderer()
       : _textureId = _textureCounter++,
         super(RTCVideoValue.empty);
 
   static const _elementIdForAudioManager = 'html_webrtc_audio_manager_list';
 
-  html.AudioElement? _audioElement;
+  web.HTMLAudioElement? _audioElement;
 
   static int _textureCounter = 1;
 
-  html.MediaStream? _videoStream;
+  web.MediaStream? _videoStream;
 
-  html.MediaStream? _audioStream;
+  web.MediaStream? _audioStream;
 
   MediaStreamWeb? _srcObject;
 
@@ -58,6 +64,8 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
   String _objectFit = 'contain';
 
   bool _muted = false;
+
+  web.HTMLVideoElement? element;
 
   set objectFit(String fit) {
     if (_objectFit == fit) return;
@@ -83,15 +91,18 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
   @override
   bool get renderVideo => _srcObject != null;
 
-  String get _elementIdForAudio => 'audio_RTCVideoRenderer-$textureId';
-  String get _elementIdForVideo => 'video_RTCVideoRenderer-$textureId';
+  String get _elementIdForAudio => 'audio_$viewType';
 
-  void _updateAllValues() {
-    final element = findHtmlView();
+  String get _elementIdForVideo => 'video_$viewType';
+
+  String get viewType => 'RTCVideoRenderer-$textureId';
+
+  void _updateAllValues(web.HTMLVideoElement fallback) {
+    final element = findHtmlView() ?? fallback;
     value = value.copyWith(
       rotation: 0,
-      width: element?.videoWidth.toDouble() ?? 0.0,
-      height: element?.videoHeight.toDouble() ?? 0.0,
+      width: element.videoWidth.toDouble(),
+      height: element.videoHeight.toDouble(),
       renderVideo: renderVideo,
     );
   }
@@ -112,14 +123,14 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
     if (null != _srcObject) {
       if (stream.getVideoTracks().isNotEmpty) {
-        _videoStream = html.MediaStream();
-        for (final track in _srcObject!.jsStream.getVideoTracks()) {
+        _videoStream = web.MediaStream();
+        for (final track in _srcObject!.jsStream.getVideoTracks().toDart) {
           _videoStream!.addTrack(track);
         }
       }
       if (stream.getAudioTracks().isNotEmpty) {
-        _audioStream = html.MediaStream();
-        for (final track in _srcObject!.jsStream.getAudioTracks()) {
+        _audioStream = web.MediaStream();
+        for (final track in _srcObject!.jsStream.getAudioTracks().toDart) {
           _audioStream!.addTrack(track);
         }
       }
@@ -130,7 +141,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
     if (null != _audioStream) {
       if (null == _audioElement) {
-        _audioElement = html.AudioElement()
+        _audioElement = web.HTMLAudioElement()
           ..id = _elementIdForAudio
           ..muted = stream.ownerTag == 'local'
           ..autoplay = true;
@@ -139,12 +150,16 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
       _audioElement?.srcObject = _audioStream;
     }
 
-    findHtmlView()?.srcObject = _videoStream;
+    var videoElement = findHtmlView();
+    if (null != videoElement) {
+      videoElement.srcObject = _videoStream;
+      _applyDefaultVideoStyles(findHtmlView()!);
+    }
 
     value = value.copyWith(renderVideo: renderVideo);
   }
 
-  void setSrcObject({MediaStream? stream, String? trackId}) {
+  Future<void> setSrcObject({MediaStream? stream, String? trackId}) async {
     if (stream == null) {
       findHtmlView()?.srcObject = null;
       _audioElement?.srcObject = null;
@@ -156,16 +171,16 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
     if (null != _srcObject) {
       if (stream.getVideoTracks().isNotEmpty) {
-        _videoStream = html.MediaStream();
-        for (final track in _srcObject!.jsStream.getVideoTracks()) {
+        _videoStream = web.MediaStream();
+        for (final track in _srcObject!.jsStream.getVideoTracks().toDart) {
           if (track.id == trackId) {
             _videoStream!.addTrack(track);
           }
         }
       }
       if (stream.getAudioTracks().isNotEmpty) {
-        _audioStream = html.MediaStream();
-        for (final track in _srcObject!.jsStream.getAudioTracks()) {
+        _audioStream = web.MediaStream();
+        for (final track in _srcObject!.jsStream.getAudioTracks().toDart) {
           _audioStream!.addTrack(track);
         }
       }
@@ -176,7 +191,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
     if (null != _audioStream) {
       if (null == _audioElement) {
-        _audioElement = html.AudioElement()
+        _audioElement = web.HTMLAudioElement()
           ..id = _elementIdForAudio
           ..muted = stream.ownerTag == 'local'
           ..autoplay = true;
@@ -185,25 +200,29 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
       _audioElement?.srcObject = _audioStream;
     }
 
-    findHtmlView()?.srcObject = _videoStream;
+    var videoElement = findHtmlView();
+    if (null != videoElement) {
+      videoElement.srcObject = _videoStream;
+      _applyDefaultVideoStyles(findHtmlView()!);
+    }
 
     value = value.copyWith(renderVideo: renderVideo);
   }
 
-  html.DivElement _ensureAudioManagerDiv() {
-    var div = html.document.getElementById(_elementIdForAudioManager);
-    if (null != div) return div as html.DivElement;
+  web.HTMLDivElement _ensureAudioManagerDiv() {
+    var div = web.document.getElementById(_elementIdForAudioManager);
+    if (null != div) return div as web.HTMLDivElement;
 
-    div = html.DivElement()
+    div = web.HTMLDivElement()
       ..id = _elementIdForAudioManager
       ..style.display = 'none';
-    html.document.body?.append(div);
-    return div as html.DivElement;
+    web.document.body?.append(div);
+    return div as web.HTMLDivElement;
   }
 
-  html.VideoElement? findHtmlView() {
-    final element = html.document.getElementById(_elementIdForVideo);
-    if (null != element) return element as html.VideoElement;
+  web.HTMLVideoElement? findHtmlView() {
+    final element = web.document.getElementById(_elementIdForVideo);
+    if (null != element) return element as web.HTMLVideoElement;
     return null;
   }
 
@@ -217,10 +236,13 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     element?.removeAttribute('src');
     element?.load();
     _audioElement?.remove();
-    final audioManager = html.document.getElementById(_elementIdForAudioManager)
-        as html.DivElement?;
+    final audioManager = web.document.getElementById(_elementIdForAudioManager)
+        as web.HTMLDivElement?;
     if (audioManager != null && !audioManager.hasChildNodes()) {
       audioManager.remove();
+    }
+    if (!useHtmlElementView) {
+      element?.remove();
     }
     return super.dispose();
   }
@@ -229,9 +251,10 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
   Future<bool> audioOutput(String deviceId) async {
     try {
       final element = _audioElement;
-      if (null != element && jsutil.hasProperty(element, 'setSinkId')) {
-        await jsutil.promiseToFuture<void>(
-            jsutil.callMethod(element, 'setSinkId', [deviceId]));
+      if (null != element &&
+          element.getProperty('setSinkId'.toJS).isDefinedAndNotNull) {
+        await (element.callMethod('setSinkId'.toJS, deviceId.toJS) as JSPromise)
+            .toDart;
 
         return true;
       }
@@ -241,68 +264,92 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     return false;
   }
 
+  web.HTMLVideoElement createElement() {
+    for (var s in _subscriptions) {
+      s.cancel();
+    }
+    _subscriptions.clear();
+
+    final element = web.HTMLVideoElement()
+      ..autoplay = true
+      ..muted = true
+      ..controls = false
+      ..srcObject = _videoStream
+      ..id = _elementIdForVideo
+      ..setAttribute('playsinline', 'true');
+
+    _applyDefaultVideoStyles(element);
+
+    _subscriptions.add(
+      element.onCanPlay.listen((dynamic _) {
+        _updateAllValues(element);
+      }),
+    );
+
+    _subscriptions.add(
+      element.onResize.listen((dynamic _) {
+        _updateAllValues(element);
+        onResize?.call();
+      }),
+    );
+
+    // The error event fires when some form of error occurs while attempting to load or perform the media.
+    _subscriptions.add(
+      element.onError.listen((web.Event _) {
+        // The Event itself (_) doesn't contain info about the actual error.
+        // We need to look at the HTMLMediaElement.error.
+        // See: https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/error
+        final error = element.error;
+        print('RTCVideoRenderer: videoElement.onError, ${error.toString()}');
+        throw PlatformException(
+          code: _kErrorValueToErrorName[error!.code]!,
+          message: error.message != '' ? error.message : _kDefaultErrorMessage,
+          details: _kErrorValueToErrorDescription[error.code],
+        );
+      }),
+    );
+
+    _subscriptions.add(
+      element.onEnded.listen((dynamic _) {
+        // print('RTCVideoRenderer: videoElement.onEnded');
+      }),
+    );
+
+    return element;
+  }
+
   @override
   Future<void> initialize() async {
-    // ignore: undefined_prefixed_name
-    ui.platformViewRegistry.registerViewFactory('RTCVideoRenderer-$textureId',
-        (int viewId) {
-      for (var s in _subscriptions) {
-        s.cancel();
-      }
-      _subscriptions.clear();
+    bool isVisible = useHtmlElementView;
+    if (isVisible) {
+      web_ui.platformViewRegistry.registerViewFactory(viewType, (int viewId) {
+        return createElement();
+      }, isVisible: isVisible);
+    } else {
+      final element = createElement();
+      web.window.document.body!.appendChild(element);
+    }
+  }
 
-      final element = html.VideoElement()
-        ..autoplay = true
-        ..muted = true
-        ..controls = false
+  void _applyDefaultVideoStyles(web.HTMLVideoElement element) {
+    // Flip the video horizontally if is mirrored.
+    if (mirror) {
+      element.style.transform = 'scaleX(-1)';
+    }
+
+    if (useHtmlElementView) {
+      element
         ..style.objectFit = _objectFit
         ..style.border = 'none'
         ..style.width = '100%'
-        ..style.height = '100%'
-        ..srcObject = _videoStream
-        ..id = _elementIdForVideo
-        ..setAttribute('playsinline', 'true');
-
-      _subscriptions.add(
-        element.onCanPlay.listen((dynamic _) {
-          _updateAllValues();
-          // print('RTCVideoRenderer: videoElement.onCanPlay ${value.toString()}');
-        }),
-      );
-
-      _subscriptions.add(
-        element.onResize.listen((dynamic _) {
-          _updateAllValues();
-          onResize?.call();
-          // print('RTCVideoRenderer: videoElement.onResize ${value.toString()}');
-        }),
-      );
-
-      // The error event fires when some form of error occurs while attempting to load or perform the media.
-      _subscriptions.add(
-        element.onError.listen((html.Event _) {
-          // The Event itself (_) doesn't contain info about the actual error.
-          // We need to look at the HTMLMediaElement.error.
-          // See: https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/error
-          final error = element.error;
-          print('RTCVideoRenderer: videoElement.onError, ${error.toString()}');
-          throw PlatformException(
-            code: _kErrorValueToErrorName[error!.code]!,
-            message:
-                error.message != '' ? error.message : _kDefaultErrorMessage,
-            details: _kErrorValueToErrorDescription[error.code],
-          );
-        }),
-      );
-
-      _subscriptions.add(
-        element.onEnded.listen((dynamic _) {
-          // print('RTCVideoRenderer: videoElement.onEnded');
-        }),
-      );
-
-      return element;
-    });
+        ..style.height = '100%';
+    } else {
+      element.style.pointerEvents = "none";
+      element.style.opacity = "0";
+      element.style.position = "absolute";
+      element.style.left = "0px";
+      element.style.top = "0px";
+    }
   }
 
   @override
@@ -310,4 +357,9 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
 
   @override
   Function? onFirstFrameRendered;
+
+  @override
+  Future<void> setVolume(double volume) async {
+    _audioElement?.volume = volume.clamp(0.0, 1.0);
+  }
 }

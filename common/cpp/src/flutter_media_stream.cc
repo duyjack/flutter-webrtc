@@ -1,10 +1,34 @@
 #include "flutter_media_stream.h"
 
-#define DEFAULT_WIDTH 640
-#define DEFAULT_HEIGHT 480
+#include "flutter_utf8_sanitize.h"
+
+#define DEFAULT_WIDTH 1280
+#define DEFAULT_HEIGHT 720
 #define DEFAULT_FPS 30
 
 namespace flutter_webrtc_plugin {
+
+namespace {
+
+std::string SanitizeDeviceIdFromAudioBuffers(const char* name, const char* guid) {
+  const std::string raw = (guid != nullptr && strlen(guid) > 0)
+                              ? std::string(guid)
+                              : std::string(name != nullptr ? name : "");
+  return SanitizeUtf8ForFlutter(raw);
+}
+
+std::string SanitizeLabel(const char* name) {
+  return SanitizeUtf8ForFlutter(std::string(name != nullptr ? name : ""));
+}
+
+std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid) {
+  const std::string raw = (guid != nullptr && strlen(guid) > 0)
+                              ? std::string(guid)
+                              : std::string(name != nullptr ? name : "");
+  return SanitizeUtf8ForFlutter(raw);
+}
+
+}  // namespace
 
 FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
   base_->audio_device_->OnDeviceChange([&] {
@@ -14,8 +38,9 @@ FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
   });
 }
 
-void FlutterMediaStream::GetUserMedia(const EncodableMap& constraints,
-                                      std::unique_ptr<MethodResultProxy> result) {
+void FlutterMediaStream::GetUserMedia(
+    const EncodableMap& constraints,
+    std::unique_ptr<MethodResultProxy> result) {
   std::string uuid = base_->GenerateUUID();
   scoped_refptr<RTCMediaStream> stream =
       base_->factory_->CreateStream(uuid.c_str());
@@ -128,9 +153,19 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     for (uint16_t i = 0; i < recording_devices; i++) {
       base_->audio_device_->RecordingDeviceName(i, strRecordingName,
                                                 strRecordingGuid);
-      if (sourceId != "" && sourceId == strRecordingGuid) {
+      if (sourceId != "" &&
+          sourceId ==
+              SanitizeDeviceIdFromAudioBuffers(strRecordingName,
+                                               strRecordingGuid)) {
         base_->audio_device_->SetRecordingDevice(i);
       }
+    }
+
+    if (sourceId == "") {
+      base_->audio_device_->RecordingDeviceName(0, strRecordingName,
+                                                strRecordingGuid);
+      sourceId = SanitizeDeviceIdFromAudioBuffers(strRecordingName,
+                                                  strRecordingGuid);
     }
 
     char strPlayoutName[256];
@@ -138,7 +173,10 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     for (uint16_t i = 0; i < playout_devices; i++) {
       base_->audio_device_->PlayoutDeviceName(i, strPlayoutName,
                                               strPlayoutGuid);
-      if (deviceId != "" && deviceId == strPlayoutGuid) {
+      if (deviceId != "" &&
+          deviceId ==
+              SanitizeDeviceIdFromAudioBuffers(strPlayoutName,
+                                               strPlayoutGuid)) {
         base_->audio_device_->SetPlayoutDevice(i);
       }
     }
@@ -158,6 +196,17 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     track_info[EncodableValue("kind")] =
         EncodableValue(track->kind().std_string());
     track_info[EncodableValue("enabled")] = EncodableValue(track->enabled());
+
+    EncodableMap settings;
+    settings[EncodableValue("deviceId")] =
+        EncodableValue(SanitizeUtf8ForFlutter(sourceId));
+    settings[EncodableValue("kind")] = EncodableValue("audioinput");
+    settings[EncodableValue("autoGainControl")] = EncodableValue(true);
+    settings[EncodableValue("echoCancellation")] = EncodableValue(true);
+    settings[EncodableValue("noiseSuppression")] = EncodableValue(true);
+    settings[EncodableValue("channelCount")] = EncodableValue(1);
+    settings[EncodableValue("latency")] = EncodableValue(0);
+    track_info[EncodableValue("settings")] = EncodableValue(settings);
 
     EncodableList audioTracks;
     audioTracks.push_back(EncodableValue(track_info));
@@ -251,7 +300,9 @@ void FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
 
   for (int i = 0; i < nb_video_devices; i++) {
     base_->video_device_->GetDeviceName(i, strNameUTF8, 256, strGuidUTF8, 256);
-    if (sourceId != "" && sourceId == strGuidUTF8) {
+    if (sourceId != "" &&
+        sourceId ==
+            SanitizeDeviceIdFromVideoBuffers(strNameUTF8, strGuidUTF8)) {
       video_capturer =
           base_->video_device_->Create(strNameUTF8, i, width, height, fps);
       break;
@@ -263,12 +314,15 @@ void FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
 
   if (!video_capturer.get()) {
     base_->video_device_->GetDeviceName(0, strNameUTF8, 128, strGuidUTF8, 128);
+    sourceId = SanitizeDeviceIdFromVideoBuffers(strNameUTF8, strGuidUTF8);
     video_capturer =
         base_->video_device_->Create(strNameUTF8, 0, width, height, fps);
   }
 
   if (!video_capturer.get())
     return;
+
+  video_capturer->StartCapture();
 
   const char* video_source_label = "video_input";
   scoped_refptr<RTCVideoSource> source = base_->factory_->CreateVideoSource(
@@ -285,27 +339,39 @@ void FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
   info[EncodableValue("label")] = EncodableValue(track->id().std_string());
   info[EncodableValue("kind")] = EncodableValue(track->kind().std_string());
   info[EncodableValue("enabled")] = EncodableValue(track->enabled());
+
+  EncodableMap settings;
+  settings[EncodableValue("deviceId")] =
+      EncodableValue(SanitizeUtf8ForFlutter(sourceId));
+  settings[EncodableValue("kind")] = EncodableValue("videoinput");
+  settings[EncodableValue("width")] = EncodableValue(width);
+  settings[EncodableValue("height")] = EncodableValue(height);
+  settings[EncodableValue("frameRate")] = EncodableValue(fps);
+  info[EncodableValue("settings")] = EncodableValue(settings);
+
   videoTracks.push_back(EncodableValue(info));
   params[EncodableValue("videoTracks")] = EncodableValue(videoTracks);
 
   stream->AddTrack(track);
 
   base_->local_tracks_[track->id().std_string()] = track;
+  base_->video_capturers_[track->id().std_string()] = video_capturer;
 }
 
 void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   EncodableList sources;
 
   int nb_audio_devices = base_->audio_device_->RecordingDevices();
-  char strNameUTF8[128];
-  char strGuidUTF8[128];
+  char strNameUTF8[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
+  char strGuidUTF8[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
 
   for (uint16_t i = 0; i < nb_audio_devices; i++) {
     base_->audio_device_->RecordingDeviceName(i, strNameUTF8, strGuidUTF8);
+    std::string device_id =
+        SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);
     EncodableMap audio;
-    audio[EncodableValue("label")] = EncodableValue(std::string(strNameUTF8));
-    audio[EncodableValue("deviceId")] =
-        EncodableValue(std::string(strGuidUTF8));
+    audio[EncodableValue("label")] = EncodableValue(SanitizeLabel(strNameUTF8));
+    audio[EncodableValue("deviceId")] = EncodableValue(device_id);
     audio[EncodableValue("facing")] = "";
     audio[EncodableValue("kind")] = "audioinput";
     sources.push_back(EncodableValue(audio));
@@ -314,10 +380,11 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   nb_audio_devices = base_->audio_device_->PlayoutDevices();
   for (uint16_t i = 0; i < nb_audio_devices; i++) {
     base_->audio_device_->PlayoutDeviceName(i, strNameUTF8, strGuidUTF8);
+    std::string device_id =
+        SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);
     EncodableMap audio;
-    audio[EncodableValue("label")] = EncodableValue(std::string(strNameUTF8));
-    audio[EncodableValue("deviceId")] =
-        EncodableValue(std::string(strGuidUTF8));
+    audio[EncodableValue("label")] = EncodableValue(SanitizeLabel(strNameUTF8));
+    audio[EncodableValue("deviceId")] = EncodableValue(device_id);
     audio[EncodableValue("facing")] = "";
     audio[EncodableValue("kind")] = "audiooutput";
     sources.push_back(EncodableValue(audio));
@@ -327,9 +394,9 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   for (int i = 0; i < nb_video_devices; i++) {
     base_->video_device_->GetDeviceName(i, strNameUTF8, 128, strGuidUTF8, 128);
     EncodableMap video;
-    video[EncodableValue("label")] = EncodableValue(std::string(strNameUTF8));
-    video[EncodableValue("deviceId")] =
-        EncodableValue(std::string(strGuidUTF8));
+    video[EncodableValue("label")] = EncodableValue(SanitizeLabel(strNameUTF8));
+    video[EncodableValue("deviceId")] = EncodableValue(
+        SanitizeDeviceIdFromVideoBuffers(strNameUTF8, strGuidUTF8));
     video[EncodableValue("facing")] = i == 1 ? "front" : "back";
     video[EncodableValue("kind")] = "videoinput";
     sources.push_back(EncodableValue(video));
@@ -342,20 +409,23 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
 void FlutterMediaStream::SelectAudioOutput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
-  char strPlayoutName[256];
-  char strPlayoutGuid[256];
+  char deviceName[256];
+  char deviceGuid[256];
   int playout_devices = base_->audio_device_->PlayoutDevices();
   bool found = false;
   for (uint16_t i = 0; i < playout_devices; i++) {
-    base_->audio_device_->PlayoutDeviceName(i, strPlayoutName, strPlayoutGuid);
-    if (device_id != "" && device_id == strPlayoutGuid) {
+    base_->audio_device_->PlayoutDeviceName(i, deviceName, deviceGuid);
+    std::string cur_device_id =
+        SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
+    if (device_id != "" && device_id == cur_device_id) {
       base_->audio_device_->SetPlayoutDevice(i);
       found = true;
       break;
     }
   }
   if (!found) {
-    result->Error("Bad Arguments", "Not found device id: " + device_id);
+    result->Error("Bad Arguments",
+                  "Not found device id: " + SanitizeUtf8ForFlutter(device_id));
     return;
   }
   result->Success();
@@ -364,21 +434,23 @@ void FlutterMediaStream::SelectAudioOutput(
 void FlutterMediaStream::SelectAudioInput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
-  char strPlayoutName[256];
-  char strPlayoutGuid[256];
+  char deviceName[256];
+  char deviceGuid[256];
   int playout_devices = base_->audio_device_->RecordingDevices();
   bool found = false;
   for (uint16_t i = 0; i < playout_devices; i++) {
-    base_->audio_device_->RecordingDeviceName(i, strPlayoutName,
-                                              strPlayoutGuid);
-    if (device_id != "" && device_id == strPlayoutGuid) {
+    base_->audio_device_->RecordingDeviceName(i, deviceName, deviceGuid);
+    std::string cur_device_id =
+        SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
+    if (device_id != "" && device_id == cur_device_id) {
       base_->audio_device_->SetRecordingDevice(i);
       found = true;
       break;
     }
   }
   if (!found) {
-    result->Error("Bad Arguments", "Not found device id: " + device_id);
+    result->Error("Bad Arguments",
+                  "Not found device id: " + SanitizeUtf8ForFlutter(device_id));
     return;
   }
   result->Success();
@@ -452,6 +524,14 @@ void FlutterMediaStream::MediaStreamDispose(
   for (auto track : video_tracks.std_vector()) {
     stream->RemoveTrack(track);
     base_->local_tracks_.erase(track->id().std_string());
+    if (base_->video_capturers_.find(track->id().std_string()) !=
+        base_->video_capturers_.end()) {
+      auto video_capture = base_->video_capturers_[track->id().std_string()];
+      if (video_capture->CaptureStarted()) {
+        video_capture->StopCapture();
+      }
+      base_->video_capturers_.erase(track->id().std_string());
+    }
   }
 
   base_->RemoveStreamForId(stream_id);
@@ -474,13 +554,13 @@ void FlutterMediaStream::CreateLocalMediaStream(
 void FlutterMediaStream::MediaStreamTrackSetEnable(
     const std::string& track_id,
     std::unique_ptr<MethodResultProxy> result) {
-  result->Success();
+  result->NotImplemented();
 }
 
 void FlutterMediaStream::MediaStreamTrackSwitchCamera(
     const std::string& track_id,
     std::unique_ptr<MethodResultProxy> result) {
-  result->Success();
+  result->NotImplemented();
 }
 
 void FlutterMediaStream::MediaStreamTrackDispose(
@@ -498,6 +578,15 @@ void FlutterMediaStream::MediaStreamTrackDispose(
     for (auto track : video_tracks.std_vector()) {
       if (track->id().std_string() == track_id) {
         stream->RemoveTrack(track);
+
+        if (base_->video_capturers_.find(track_id) !=
+            base_->video_capturers_.end()) {
+          auto video_capture = base_->video_capturers_[track_id];
+          if (video_capture->CaptureStarted()) {
+            video_capture->StopCapture();
+          }
+          base_->video_capturers_.erase(track_id);
+        }
       }
     }
   }
